@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import utils
 
 
 class KinematicRnnModel(nn.Module):
@@ -78,6 +79,7 @@ class GRU_NN(FCNN):
         op, hx = self.gru(x.double(), h)
         return super().forward(op), hx
 
+
 class Policy(nn.Module):
     def __init__(self, input_dim, op_dim):
         super().__init__()
@@ -88,12 +90,32 @@ class Policy(nn.Module):
             nn.ReLU(),
             nn.Linear(50, 50),
             nn.ReLU(),
+        )
+        self.mean = nn.Sequential(
             nn.Linear(50, op_dim),
             nn.Tanh(),
         )
+        self.logvar = nn.Linear(50, op_dim)
 
     def forward(self, x):
-        return self.model(x)
+        latent = self.model(x)
+        mean = self.mean(latent)
+        lvar = torch.clamp(self.logvar(latent), -20, 2)
+        normal = torch.distributions.normal.Normal(mean, torch.exp(lvar/2))
+        print(f'logvar: {lvar}')
+        return torch.clamp(normal.rsample(), -1, 1)
+
+    def print_grads(self):
+        grads = {
+            k: np.array([a.grad.min(), a.grad.max(), a.grad.mean(), a.grad.std()])
+            for k, a in self.named_parameters()
+        }
+        # grads = torch.stack([
+        #     torch.tensor([a.grad.min(), a.grad.max()])
+        #     for a in self.parameters()
+        # ]).transpose(0, 1).detach().numpy()
+        print(utils.dict_as_table(grads))
+
 
 class MBRLPolicy(nn.Module):
     def __init__(self, seq_len, dt, ret_state=True, ip_dim=None, op_dim=None):

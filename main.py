@@ -29,7 +29,8 @@ def optimize(loss, policy, optimizer):
     policy.train()
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(policy.parameters(), 15.)
+    # policy.policy.print_grads()
+    print(torch.nn.utils.clip_grad_norm_(policy.parameters(), 15.))
     optimizer.step()
 
 
@@ -109,8 +110,8 @@ def main(env, policy, optimizer, n_eps, evaluate=False):
                 break
             do_actions(actions[:5], env, render=True)
             # prev_state = current_state.clone()
-            if np.linalg.norm(env.distance_from_goal()) < 0.05:
-                break
+            # if np.linalg.norm(env.distance_from_goal()) < 0.05:
+            #     break
         if (eps + 1)%50 == 0:
             evaluate(env, policy, 10)
             torch.save(
@@ -125,7 +126,7 @@ if __name__ == '__main__':
     env = gym.make('Go2Goal-v0', config={'num_iter': 1, 'dt': 0.1})
     policy = Models.MBRLPolicy2(50, 0.1)
     optimizer = torch.optim.Adam(policy.policy.parameters(), lr=0.0025)
-    policy.load_state_dict(torch.load('/home/aarg/Documents/mbrl_torch_g2g/models/pi30082019_2303'))
+    # policy.load_state_dict(torch.load('/home/aarg/Documents/mbrl_torch_g2g/models/pi30082019_2303'))
     # evaluate(env, policy, 10)
     main(env, policy, optimizer, N_EPS, evaluate=EVALUATE)
     env.close()
