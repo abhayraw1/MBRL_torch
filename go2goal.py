@@ -131,11 +131,11 @@ class Go2Goal(gym.Env):
             self.goal_vec.set_color(1., 0.01, 0.02)
             self.viewer.add_geom(self.goal_vec)
 
-            goal = rendering.make_circle()
-            goal.set_color(0.3, 0.82, 0.215)
-            self.visual_goal_trans = rendering.Transform()
-            goal.add_attr(self.visual_goal_trans)
-            self.viewer.add_geom(goal)
+            # goal = rendering.make_circle()
+            # goal.set_color(0.3, 0.82, 0.215)
+            # self.visual_goal_trans = rendering.Transform()
+            # goal.add_attr(self.visual_goal_trans)
+            # self.viewer.add_geom(goal)
 
             vs = [c+Go2Goal.cossin(0)*sh, c+Go2Goal.cossin(-np.pi/2)*ss,
                   c+Go2Goal.cossin(np.pi/2)*ss]
@@ -144,6 +144,13 @@ class Go2Goal(gym.Env):
             self.visual_agent_trans = rendering.Transform()
             agent.add_attr(self.visual_agent_trans)
             self.viewer.add_geom(agent)
+
+            goal = rendering.FilledPolygon([tuple(i) for i in vs])
+            goal.set_color(0.3, 0.82, 0.215)
+            self.visual_goal_trans = rendering.Transform()
+            goal.add_attr(self.visual_goal_trans)
+            self.viewer.add_geom(goal)
+            
             self.traj_geom = []
             if extra is not None:
                 count = 0
@@ -155,10 +162,10 @@ class Go2Goal(gym.Env):
                     self.viewer.add_geom(self.traj_geom[-1])
                     count+=1
 
-        self.goal_vec.start = tuple((a*scale+screen_width/2.0))
-        self.goal_vec.end = tuple((a*scale+screen_width/2.0) +
-                                  self.obs["desired_goal"][:-1] *
-                                  self.obs["desired_goal"][-1] * scale)
+        # self.goal_vec.start = tuple((a*scale+screen_width/2.0))
+        # self.goal_vec.end = tuple((a*scale+screen_width/2.0) +
+        #                           self.obs["desired_goal"][:-1] *
+        #                           self.obs["desired_goal"][-1] * scale)
 
         self.visual_goal_trans.set_translation(*(c*scale+screen_width/2.0))
         self.visual_goal_trans.set_rotation(theta)

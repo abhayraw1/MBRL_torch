@@ -36,7 +36,7 @@ def optimize(loss, policy, optimizer):
 
 def compute_loss(actions, states, target): 
     gloss, aloss, vloss, nloss = 0, 0, 0, 0
-    tloss = 0
+    tloss = (states[-1] - target)**2
     seq_len = len(actions)
     for i, (s, u) in enumerate(zip(states, actions)):
         # print(i)
@@ -46,16 +46,10 @@ def compute_loss(actions, states, target):
         vloss += torch.norm(s[-2:])*0.05
         if i == (seq_len - 10):
             tloss += torch.norm((states[-1][-2:] - target[-2:]))
-
-    # if torch.norm(states[-1][:2] - target[:2]) < 0.1:
-        # gloss = gloss/2
-        # gloss += tloss
-    # else:
-
-    loss = gloss*2 + aloss + vloss + tloss
+    loss = gloss*2 + aloss + vloss + torch.dot(mu, tloss)
     print(f'Goal Loss: {gloss}')
     print(f'Control Loss: {aloss}')
-    # print(f'Terminal Loss: {tloss}')
+    print(f'Terminal Loss: {tloss}')
     print(f'Velocity Loss: {vloss}')
     # print(f'Negative Velocity Loss: {nloss}')
     print(f'Total Loss: {loss}')
@@ -96,11 +90,19 @@ def main(env, policy, optimizer, n_eps, evaluate=False):
                 traj = []
                 # actions, states = policy(get_obs_tensor())
                 actions, states = policy(current_state, prev_state, desired_state)
+                ssss = states[-1].detach()
                 loss = compute_loss(actions, states, desired_state)
+                # pdb.set_trace()
                 if evaluate:
                     break
                 else:
                     optimize(loss, policy, optimizer)
+                    terminal_loss = -torch.dot(mu, (ssss - desired_state)**2)
+                    coptimizer.zero_grad()
+                    terminal_loss.backward()
+                    # pdb.set_trace()
+                    coptimizer.step()
+                    mu.data.clamp_(0)
                 traj = np.array([s.detach().numpy() for s in states])[:, :2]
                 env.render(extra=traj)
             actions = np.array([a.detach().numpy() for a in actions])
@@ -125,7 +127,10 @@ if __name__ == '__main__':
     N_EPS = 2500
     env = gym.make('Go2Goal-v0', config={'num_iter': 1, 'dt': 0.1})
     policy = Models.MBRLPolicy2(50, 0.1)
+    mu = torch.rand(6, dtype=torch.float64, requires_grad=True)
+    print(id(mu))
     optimizer = torch.optim.Adam(policy.policy.parameters(), lr=0.0025)
+    coptimizer = torch.optim.Adam([mu], lr=0.0025)
     # policy.load_state_dict(torch.load('/home/aarg/Documents/mbrl_torch_g2g/models/pi30082019_2303'))
     # evaluate(env, policy, 10)
     main(env, policy, optimizer, N_EPS, evaluate=EVALUATE)
