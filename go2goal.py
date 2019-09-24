@@ -65,11 +65,12 @@ class Go2Goal(gym.Env):
             self.dMax = self.action_high[0]*self.dt*self.num_iter
             self.dRange = 2*self.dMax
         self.viewer = None
-        self._spec = EnvSpec("Go2Goal-v0")
+        self.spec = EnvSpec("Go2Goal-v0", max_episode_steps=self._max_episode_steps)
 
     def reset(self):
         self.agent.reset(self.sample_pose())
         self.goal = self.sample_pose()
+        self.ts = 0
 
         # print("Agent spawned at: ", self.agent.pose)
         # print("Goalpoint set to: ", self.goal)
@@ -80,6 +81,8 @@ class Go2Goal(gym.Env):
         prev_pose = self.agent.pose.clone()
         for i in range(self.num_iter):
             self.agent.step(action, dt=self.dt)
+        self.ts += 1
+        # print(f'TIMESTEP: {self.ts}' )
         reward, done = self.get_reward()
         return self.compute_obs(prev_pose), reward, done,\
             {"dist": self.current_distance, "is_success": done}
@@ -186,7 +189,7 @@ class Go2Goal(gym.Env):
         distance = np.linalg.norm(goal_vec)
         unit_vec = goal_vec / distance if distance != 0 else goal_vec
         # c_dist = min(distance, self.d_clip)#/self.d_clip
-        c_dist = distance
+        c_dist = min(distance, 1)
         sc = np.hstack([np.cos(self.agent.pose.theta),
                         np.sin(self.agent.pose.theta)])
         goal = np.hstack([unit_vec, c_dist])
@@ -203,7 +206,7 @@ class Go2Goal(gym.Env):
         self.obs = {"observation": sc,
                     "desired_goal": goal,
                     "achieved_goal": ag}
-        return self.obs
+        return np.concatenate([sc, goal], axis=-1)
 
     def close(self):
             if self.viewer:
@@ -216,9 +219,9 @@ class Go2Goal(gym.Env):
     def compute_reward(self, achieved_goal, desired_goal, info):
         # print(achieved_goal.shape)
         # print(desired_goal.shape)
-        r = norm(achieved_goal - desired_goal, axis=1)
+        r = np.dot(achieved_goal, desired_goal)
         # print(r, r.shape, r.astype('i'))
-        return (r < self.thresh).astype('i')
+        return r, (r < self.thresh or self.ts >= self._max_episode_steps).astype('i')
 
 
 register(
