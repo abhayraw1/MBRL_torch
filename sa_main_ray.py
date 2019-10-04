@@ -16,6 +16,7 @@ import time
 import pathlib
 import logging
 import argparse
+import numpy as np
 
 import ray
 from ray import tune
@@ -34,7 +35,10 @@ parser.add_argument("--gpu", action="store_true")
 parser.add_argument("--num-iters", type=int, default=9000)
 parser.add_argument("--num-workers", type=int, default=10)
 parser.add_argument("--num-eval-eps", type=int, default=5)
-parser.add_argument("--eval-horizon", type=int, default=45)
+parser.add_argument("--eval-horizon", type=int, default=100)
+
+np.set_printoptions(suppress=True, linewidth=300, precision=4,
+                    formatter={'float_kind':'{:10.6f}'.format})
 
 
 def copy_local2remote(policy, workers, a_model=True, p_model=True):
@@ -48,46 +52,6 @@ def copy_local2remote(policy, workers, a_model=True, p_model=True):
         w.set_weights.remote(
             weights, {'action_model': a_model, 'prediction_model': p_model}
         )
-
-
-def get_make_env(scenario_name, benchmark=False):
-    from gym.wrappers import Monitor
-    from multiagent.environment import MultiAgentEnv
-    import multiagent.scenarios as scenarios
-    scenario = scenarios.load(scenario_name + ".py").Scenario()
-    world = scenario.make_world()
-    from ray.rllib.env.multi_agent_env import MultiAgentEnv as MAE_RAY
-
-    class ray_mae_cls(MultiAgentEnv, MAE_RAY):
-        def __init__(self, *args, **kwargs):
-            MultiAgentEnv.__init__(self, *args, **kwargs)
-    
-    def  make_env(c=None, return_ids=False, return_base=False):
-        if benchmark:        
-            base = ray_mae_cls(
-                world,
-                scenario.reset_world,
-                scenario.reward,
-                scenario.observation,
-                scenario.benchmark_data,
-            )
-        else:
-            base = ray_mae_cls(
-                world,
-                scenario.reset_world,
-                scenario.reward,
-                scenario.observation,
-            )
-
-        agent_ids = list(base.agents.keys())
-        env = BaseEnv.to_base_env(base)
-        rets = [env]
-        if return_ids:
-            rets.append(agent_ids)
-        if return_base:
-            rets.append(base)
-        return rets if len(rets) > 1 else rets[0]
-    return make_env
 
 
 def get_video_rec_callbacks(vr):
@@ -114,63 +78,43 @@ def get_video_rec_callbacks(vr):
 
 
 def training_workflow(config, reporter):
-    env_maker = get_make_env('simple_spread')
-    env, agent_ids, base = env_maker(return_ids=True, return_base=True)
+    env_maker = lambda c: gym.make('Pendulum-v0')
+    base = env_maker(None)
     config['buffer_size'] = 100000
-    config['objects_to_track'] = 1
-    config['seq_len'] = 25
+    config['seq_len'] = 100
     FLAG_MAKE_FRESH_DIR = True
     last_iter_saved = 0
+    last_iter_train = 0
 
     ############################ DEFINE POLICY STUFF ###########################
-    policy = {}
-    replay_buffers = {}
-
-    for agent_id in agent_ids:
-        obs = base.observation_space[agent_id]
-        act = base.action_space[agent_id]
-        policy[agent_id] = MBRLPolicy(obs, act, config)
-        replay_buffers[agent_id] = ReplayBuffer(config['buffer_size'])
-
-    policy_map = lambda agent_id: agent_id
+    obs = base.observation_space
+    act = base.action_space
+    policy = MBRLPolicy(obs, act, config)
+    replay_buffer = ReplayBuffer(config['buffer_size'])
 
     ############################## REMOTE WORKERS ##############################
     remote_workers = []
     for _ in range(config["num_workers"]):
         worker = RolloutWorker.as_remote().remote(
             env_maker,
-            policy={
-                agent_id: (MBRLPolicy,
-                    base.observation_space[agent_id],
-                    base.action_space[agent_id],
-                    config)
-                for agent_id in agent_ids
-            },
-            policy_mapping_fn=policy_map,
-            episode_horizon=30
+            policy=MBRLPolicy,
+            episode_horizon=100,
         )
         remote_workers.append(worker)
 
     ################################ EVAL WORKER ###############################
     eval_worker = RolloutWorker(
         lambda x: base,
-        policy={
-            agent_id: (MBRLPolicy,
-                base.observation_space[agent_id],
-                base.action_space[agent_id],
-                config)
-            for agent_id in agent_ids
-        },
-        policy_mapping_fn=policy_map,
+        policy=MBRLPolicy,
         episode_horizon=config['eval_horizon'],
         batch_steps=config['eval_horizon']*config['num_eval_eps'],
+        eval_mode=True,
     )
-    pdb.set_trace()
-    eval_worker.policy_map = policy
+    eval_worker.policy_map['default_policy'] = policy
     ########################### VIDEO RECORDER SETUP ###########################
     video_recorder = VideoRecorder(
         env=eval_worker.sampler.base_env.get_unwrapped()[0],
-        path='/home/aarg/Documents/mbrl_torch_g2g/monitor/vid.mp4',
+        path='/home/aarg/Documents/mbrl_torch_g2g/monitor/pendulum/vid.mp4',
     )
     recorder_callbacks = get_video_rec_callbacks(video_recorder)
     eval_worker.callbacks.update(recorder_callbacks)
@@ -178,60 +122,68 @@ def training_workflow(config, reporter):
     video_dir = pathlib.Path(video_recorder.path).parent
 
     copy_local2remote(policy, remote_workers)
-    actor_loss = {}
-    predictor_loss = {}
+
+    actor_loss = 'None'
     for i in range(config["num_iters"]):
         # braodcast only the belief from the local policy to the remote one
         copy_local2remote(policy, remote_workers, a_model=False)
 
         # Gather a batch of samples
-        T1 = SampleBatch.concat_samples(
+        batch = SampleBatch.concat_samples(
             ray.get([w.sample.remote() for w in remote_workers])
         )
 
+        # pdb.set_trace()
         # Train the belief network
-        for agent_id, batch in T1.policy_batches.items():
-            # Add samples to Replay Buffer
-            for row in batch.rows():
-                replay_buffers[agent_id].add(
-                    row["obs"], row["actions"], row["rewards"],
-                    row["new_obs"], row["dones"], weight=None
-                )
-            loss = policy[agent_id].train_predictor(batch)
-            predictor_loss[agent_id] = loss
+        # Add samples to Replay Buffer
+        actions = []
+        for row in batch.rows():
+            replay_buffer.add(
+                row["obs"], row["actions"], row["rewards"],
+                row["new_obs"], row["dones"], weight=None
+            )
+            actions.append(row['actions'])
+        for _ in range(2):
+            batch = replay_buffer.sample(128, return_dict=True)
+            predictor_loss = policy.train_predictor(batch)
 
         # Train the actor network
-        if (i + 1) % 15 == 0:
-            actor_loss = {}
-            for agent_id, rbuffer in replay_buffers.items():
-                batch = rbuffer.sample(64)
-                for _ in range(10):
-                    loss = policy[agent_id].train_actor(batch)
-                actor_loss[agent_id] = loss
+        if (i - last_iter_train)/5 > 0 and predictor_loss['MAE'] < 0.05:
+            last_iter_train = i
             # Train the action Model (off-policy?)
+            for _ in range(10):
+                batch = replay_buffer.sample(128)
+                loss = policy.train_actor(batch, 50)
+                print('-'*100)
+            actor_loss = loss
             # broadcast the action model to the remote workers.
             copy_local2remote(policy, remote_workers, p_model=False)
+
         info = collect_metrics(remote_workers=remote_workers)
-        # pdb.set_trace()
+        info['actions'] = {
+            'mean': np.mean(actions),
+            'std': np.std(actions)
+        }
         info['predictor_loss'] = predictor_loss
         info['actor_loss'] = actor_loss
-        if (i - last_iter_saved)/30 > 0:
-            last_iter_saved = i
-            for agent_id, pi in policy.items():
-                date = time.strftime("%d%m%Y", time.localtime())
-                __id = time.strftime("%H%M", time.localtime())
-                path = '/home/aarg/Documents/mbrl_torch_g2g/models/mbrl'
-                c = 1
-                while os.path.exists(f'{path}/{date}') and FLAG_MAKE_FRESH_DIR:
-                    date = time.strftime("%d%m%Y", time.localtime()) + f'_{c}'
-                    c += 1
-                FLAG_MAKE_FRESH_DIR = False
-                path = f'{path}/{date}/{__id}/{agent_id}'
-                pathlib.Path(path).mkdir(parents=True, exist_ok=True)
-                pi.save_models(path)
+        # if (i - last_iter_saved)/30 > 0:
+        #     last_iter_saved = i
+        #     for agent_id, pi in policy.items():
+        #         date = time.strftime("%d%m%Y", time.localtime())
+        #         __id = time.strftime("%H%M", time.localtime())
+        #         path = '/home/aarg/Documents/mbrl_torch_g2g/models/mbrl'
+        #         c = 1
+        #         while os.path.exists(f'{path}/{date}') and FLAG_MAKE_FRESH_DIR:
+        #             date = time.strftime("%d%m%Y", time.localtime()) + f'_{c}'
+        #             c += 1
+        #         FLAG_MAKE_FRESH_DIR = False
+        #         path = f'{path}/{date}/{__id}/{agent_id}'
+        #         pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+        #         pi.save_models(path)
         if (i + 1) % 100 == 0:        
-            video_recorder.path = str(video_dir/f'EvalRollout_{i+1}.mp4')
+            video_recorder.path = str(video_dir/f'PendulumEvalRollout_{i+1}.mp4')
             eval_worker.sample()
+            # pdb.set_trace()
         reporter(**info)
 
 

@@ -48,6 +48,10 @@ eva = TextFormatter("m")
 info = TextFormatter("m")
 log = TextFormatter("b", st="b")
 
+import numpy as np
+np.set_printoptions(suppress=True, linewidth=300, precision=4,
+                    formatter={'float_kind':'{:10.6f}'.format})
+
 
 def dict_as_table(data):
     if not isinstance(data, dict):

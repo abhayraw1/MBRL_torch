@@ -1,9 +1,11 @@
 import pdb
 import torch
+import numpy as np
 from torch import nn
 import torch.nn.functional as F
-
+import utils
 from ray.rllib.models.torch.misc import normc_initializer, SlimFC
+
 
 class DynamixForward(nn.Module):
     def __init__(self, in_dim, op_dim):
@@ -52,7 +54,7 @@ class VanillaModel(nn.Module):
             in_size=last_layer_size,
             out_size=op_dim,
             initializer=normc_initializer(0.01),
-            activation_fn=output_activation
+            activation_fn=None if self.gaussian else output_activation
         )
         if self.gaussian:
             self.lstdl = SlimFC(
@@ -61,6 +63,13 @@ class VanillaModel(nn.Module):
                 initializer=normc_initializer(1.0)
             )
         self.op_dim = op_dim
+
+    def print_grads(self):
+        grads = {
+            k: np.array([a.grad.min(), a.grad.max(), a.grad.mean(), a.grad.std()])
+            for k, a in self.named_parameters()
+        }
+        print(utils.dict_as_table(grads))
 
     def forward(self, x, return_mode='SAMPLE', random=False):
         if random:
@@ -72,12 +81,12 @@ class VanillaModel(nn.Module):
         if self.gaussian:
             if return_mode == 'DETERMINISTIC':
                 return m
-            s = torch.clamp(self.lstdl(h), -13, 2)
+            s = torch.clamp(self.lstdl(h), -20, 1)
             if return_mode == 'PARAMS':
                 return m, s
             dist = torch.distributions.normal.Normal(m, torch.exp(s))
             if return_mode == 'DIST':
                 return dist
             if return_mode == 'SAMPLE':
-                return dist.sample()
+                return dist.rsample()
         return m
