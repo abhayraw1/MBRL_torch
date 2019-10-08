@@ -80,8 +80,8 @@ def get_video_rec_callbacks(vr):
 def training_workflow(config, reporter):
     env_maker = lambda c: gym.make('Pendulum-v0')
     base = env_maker(None)
-    config['buffer_size'] = 100000
-    config['seq_len'] = 100
+    config['buffer_size'] = 10000
+    config['seq_len'] = 25
     FLAG_MAKE_FRESH_DIR = True
     last_iter_saved = 0
     last_iter_train = 0
@@ -143,18 +143,18 @@ def training_workflow(config, reporter):
                 row["new_obs"], row["dones"], weight=None
             )
             actions.append(row['actions'])
-        for _ in range(2):
+        for _ in range(10):
             batch = replay_buffer.sample(128, return_dict=True)
             predictor_loss = policy.train_predictor(batch)
 
         # Train the actor network
-        if (i - last_iter_train)/5 > 0 and predictor_loss['MAE'] < 0.05:
+        if (i - last_iter_train)//15 > 0 and predictor_loss['MAE'] < 0.05:
             last_iter_train = i
             # Train the action Model (off-policy?)
             for _ in range(10):
                 batch = replay_buffer.sample(128)
-                loss = policy.train_actor(batch, 50)
-                print('-'*100)
+                loss = policy.train_actor(batch, 30)
+                # print('-'*100)
             actor_loss = loss
             # broadcast the action model to the remote workers.
             copy_local2remote(policy, remote_workers, p_model=False)
@@ -202,7 +202,8 @@ if __name__ == "__main__":
             "num_workers": args.num_workers,
             "num_iters": args.num_iters,
             'num_eval_eps': args.num_eval_eps,
-            'eval_horizon': args.eval_horizon
+            'eval_horizon': args.eval_horizon,
+            'device': 'cuda' if args.gpu else 'cpu'
         },
         verbose=2,
         loggers=None,

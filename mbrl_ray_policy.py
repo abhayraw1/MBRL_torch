@@ -5,16 +5,18 @@ import time
 import torch
 import numpy as np
 
+from threading import Lock
+
 from torch import nn
 from torch.optim import Adam
+from torch.distributions import *
+
+from ray.rllib.utils.annotations import override
 from ray.rllib.policy.torch_policy import TorchPolicy
 from ray.rllib.policy.policy import Policy, LEARNER_STATS_KEY
-from ray_models import *
-from threading import Lock
-from ray.rllib.utils.annotations import override
 from ray.rllib.models.torch.torch_action_dist import (TorchMultinomial,
                                                       TorchDiagGaussian)
-
+from ray_models import *
 
 class MBRLPolicy(TorchPolicy):
     """Model Predictive Policy for an Agent in multi-agent scenario.
@@ -37,35 +39,27 @@ class MBRLPolicy(TorchPolicy):
         self.config = config or {}
         self.seq_len = self.config.get('seq_len', 20)
         self.lock = Lock()
-        self.device = torch.device("cpu")
+        self.device = torch.device(self.config.get('device', 'cpu'))
         self.obj2trk = self.config.get('objects_to_track', 1)
-        self.observation_space = observation_space
-        self.action_space = action_space
-        self.obs_input = MBRLPolicy.size(self.observation_space)
-        self.act_input = MBRLPolicy.size(self.action_space)
+        self.obs_space = self.observation_space = observation_space
+        self.act_space = self.action_space = action_space
+        self.obs_input = MBRLPolicy.size(self.obs_space)
+        self.act_input = MBRLPolicy.size(self.act_space)
+        self.obs_space_interval = self.obs_space.high - self.obs_space.low
+        self.obs_space_interval = self.convert(self.obs_space_interval)
         self.discrete_ac_sp = isinstance(action_space, gym.spaces.Discrete)
         self._action_model = VanillaModel(
-            self.obs_input, self.act_input, [50, 50], gaussian=True
+            self.obs_input, self.act_input, [50, 50], gaussian=True,
+            output_activation=nn.Tanh
         ).to(self.device)
-        # 1 input for agent identification. O/P is Gaussian Params
+
+        # self._prediction_model = DynamixForward(
+        #     self.obs_input + self.act_input, self.obs_input,
+        # ).to(self.device)
         self._prediction_model = VanillaModel(
-            self.obs_input + self.act_input, self.obs_input, [64, 64],
-            gaussian=True
+            self.obs_input + self.act_input, self.obs_input, [50, 50],
+            gaussian=True, output_activation=nn.Tanh
         ).to(self.device)
-        # self._action_model = VanillaModel(
-        #     self.obs_input, self.act_input, [50, 50],
-        #     output_activation=nn.Tanh, gaussian=True
-        # ).to(self.device)
-        # # 1 input for agent identification. O/P is Gaussian Params
-        # self._prediction_model = VanillaModel(
-        #     self.obs_input//self.obj2trk + self.act_input + 1, 6, [64, 64],
-        #     output_activation=nn.Tanh, gaussian=True
-        # ).to(self.device)
-        # self.action_dist_class = (
-        #     TorchCategorical 
-        #     if self.discrete_ac_sp
-        #     else TorchDiagGaussian
-        # )
         self._actor_params = {
             f'A_{k}': v for k, v in
             self._action_model.named_parameters()
@@ -80,11 +74,25 @@ class MBRLPolicy(TorchPolicy):
         self.action_dist_class = TorchDiagGaussian
         self._track_id = torch.arange(0, 1, 1/self.obj2trk).view(-1, 1)
         self.random_actions = False
-        self._optimizer1 = Adam(self._action_model.parameters(), lr=0.00005)
-        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.01)
-        self.discount = 0.99**torch.arange(self.seq_len-1, -1, -1)[None] #only consider last timestep
+        self._optimizer1 = Adam(self._action_model.parameters(), lr=0.0001)
+        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.001)
+        self.discount = 0.99**torch.arange(self.seq_len-1, -1, -1)[None]
         self.discount = self.discount.transpose(1, 0).float()
-
+        self.MSE_loss =  torch.nn.MSELoss()
+        self.action_transforms = [
+            TanhTransform(),
+            AffineTransform(
+                loc=0,
+                scale=self.convert(self.act_space.high)
+            )
+        ]
+        self.prediction_transforms = [
+            TanhTransform(),
+            AffineTransform(
+                loc=0,
+                scale=self.convert(self.obs_space.high)
+            )
+        ]
 
     def convert(self, arr):
         tensor = torch.from_numpy(np.asarray(arr))
@@ -92,62 +100,58 @@ class MBRLPolicy(TorchPolicy):
             tensor = tensor.float()
         return tensor.to(self.device)
 
-
-    def trajectory_loss(self, xs, us, lp):
-        txs = torch.stack(xs)
-        uss = torch.stack(us)
-        lps = torch.stack(lp)
+    def trajectory_loss(self, xs, us, lp, means=None):
+        # The timesteps are reversed for cumsum
+        # We need the t=0 cost to be sum of c_t \in {0, 1,... self.seq_len}
+        txs = torch.stack(xs[::-1])
+        uss = torch.stack(us[::-1])
+        lps = torch.stack(lp[::-1]).squeeze()
         c, s, d = txs.transpose(0, -1).transpose(-1, 1)
-        costs = []
-        losses = []
-        loss = 0
         th = torch.atan2(s, c)
-        for i in range(self.seq_len):
-            e = self.seq_len - i - 1
-            cost = (th[e])**2# + 0.1*d[e]**2 + 0.001*uss[e]**2
-            if i == 0:
-                costs.insert(0, cost)
-                continue
-            costs.insert(0, cost + costs[0])
-            losses.append(lp[e]*cost)
-            loss -= lp[e]*cost
-        # pdb.set_trace()
-        # # pdb.set_trace()
-        # cost = -(th**2 + 0.1*d**2 + 0.001*uss**2)*lps
-
-        return loss.mean()/10
-        # return cost.sum(dim=0).mean()
-
-    # def trajectory_loss(self, xs, us, lp):
-    #     txs = torch.stack(xs)
-    #     lps = torch.stack(lp)
-    #     #  or consider only last
-    #     # txs = txs[-1]
-    #     pos = torch.chunk(txs, 3, dim=-1)
-    #     dst = torch.stack([torch.norm(p, dim=-1) for p in pos], dim=-1)
-    #     # if not (dst.detach().numpy() > 0).all() or True:
-    #     min_distance, _ = torch.min(dst, dim=-1)
-    #     # print(min_distance.shape)
-    #     # pdb.set_trace()
-    #     loss = min_distance*(-lps*self.discount)
-    #     # loss = min_distance.mean()
-    #     # loss = 
-    #     # loss = -torch.log(torch.sum(torch.exp(-dst), dim=-1)).mean()
-    #     return loss.sum(dim=0).mean()
+        cost = torch.cumsum(th**2 + 0.1*d**2 + 0.001*uss**2, dim=0)
+        expected_cost = lps*cost
+        return expected_cost.mean(dim=0).mean()
 
     def eval_predictor(self, batch):
         x = self.convert(batch['obs'])
         u = self.convert(batch['actions']).view(-1, self.act_input)
-        x_p1 = self.convert(batch['new_obs'])
-        d_p1 = x_p1 - x
-        # pdb.set_trace()
-        y_p1 = self._prediction_model(
-            torch.cat([x, u], dim=-1), return_mode='DIST'
-        )
-        loss = -y_p1.log_prob(d_p1).sum(dim=-1).mean()
-        mse = ((d_p1 - y_p1.mean)**2).sum(dim=-1).mean().detach().item()
-        mae = ((d_p1 - y_p1.mean).abs()).sum(dim=-1).mean().detach().item()
+        x_p1 = self.convert(batch['new_obs'])/self.obs_space_interval
+        y_p1 = self._prediction_model(x, u)/self.obs_space_interval
+        loss = self.MSE_loss(x_p1, y_p1)
+        mse = loss.detach().item()
+        mae = (y_p1 - x_p1).abs().sum(dim=-1).mean().detach().item()
+        # d_p1 = x_p1 - x
+        # # pdb.set_trace()
+        # dist = self._prediction_model(
+        #     torch.cat([x, u], dim=-1), return_mode='DIST'
+        # )
+        # d = TransformedDistribution(dist, self.prediction_transforms)
         return loss, mse, mae
+
+    def generate_trajectory(self,
+                            x,
+                            seq_len=None,
+                            return_log_probs=False,
+                            mode='T'):
+        seq_len = seq_len or self.seq_len
+        xs, us, lp = [], [], []
+        for i in range(seq_len):
+            u = self._action_model(x)
+            if mode == 'E':
+                mean = u.mean
+                logstd = u.stddev.log()
+            d = TransformedDistribution(u, self.action_transforms)
+            a = d.sample()
+            x = self._prediction_model(x, a).detach()
+            us.append(a.squeeze().clone())
+            xs.append(x.squeeze().clone())
+            if return_log_probs:
+                if torch.any(torch.isnan(d.log_prob(a))):
+                    pdb.set_trace()
+                lp.append(d.log_prob(a))
+        if return_log_probs:
+            return xs, us, lp
+        return xs, us
 
     def train_predictor(self, batch):
         with self.lock:
@@ -160,11 +164,6 @@ class MBRLPolicy(TorchPolicy):
 
     def train_actor(self, batch, num_times=1):
         with self.lock:
-            with torch.no_grad():
-                keys = ['obs', 'actions', 'reward', 'new_obs', 'done']
-                datch = {k: self.convert(v) for k, v in zip(keys, batch)}
-                pl = self.eval_predictor(datch)
-            print('PRED LOSS ===--> ', pl)
             x = self.convert(batch[0])
             for _ in range(num_times):
                 self._optimizer1.zero_grad()
@@ -172,16 +171,12 @@ class MBRLPolicy(TorchPolicy):
                     x, seq_len=self.seq_len, return_log_probs=True
                 )
                 loss = self.trajectory_loss(xs, us, lp)
-                pdb.set_trace()
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     self._action_model.parameters(), 5, norm_type=2
                 )
-                # self._action_model.print_grads()
                 self._optimizer1.step()
-                print(f'loss: {loss.detach().item()}')
             return loss.detach().item()
-# make_dot(lp[2].sum(), self._all_params).render('lp2')
 
     @override(TorchPolicy)
     def compute_actions(self,
@@ -197,41 +192,10 @@ class MBRLPolicy(TorchPolicy):
         with self.lock:
             with torch.no_grad():
                 z = self.convert(obs_batch)
-                # on trajectory optimization here ?
                 xs, us = self.generate_trajectory(z, seq_len=1, mode=eval_mode)
                 us = [u.cpu().numpy() for u in us]
                 xs = [u.cpu().numpy() for u in xs]
         return (us, xs, {}) if return_states else (us, [], {})
-
-    def generate_trajectory(self,
-                            x,
-                            seq_len=None,
-                            return_log_probs=False,
-                            mode='T'):
-        seq_len = seq_len or self.seq_len
-        xs, us, lp = [], [], []
-        return_mode = 'DETERMINISTIC' if mode == 'E' else 'PARAMS'
-        for i in range(seq_len):
-            u = self._action_model(x, return_mode=return_mode)
-            # pdb.set_trace()
-            if return_mode == 'PARAMS':
-                u = torch.cat(u, dim=-1)
-            d = self.action_dist_class(inputs=u, model=self._action_model)
-            a = d.sample().float().clamp(
-                    self.action_space.low[0],
-                    self.action_space.high[0]
-                )
-            x = x + self._prediction_model(
-                torch.cat([x, a], dim=-1), return_mode='DETERMINISTIC'
-            ).detach()
-            # pdb.set_trace()
-            us.append(a.squeeze().clone())
-            xs.append(x.squeeze().clone())
-            if return_log_probs:
-                lp.append(d.logp(a))
-        if return_log_probs:
-            return xs, us, lp
-        return xs, us
 
     def learn_on_batch(self, samples):
         print('implement your learning code here\n'*10)
