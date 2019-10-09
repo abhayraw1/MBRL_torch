@@ -74,8 +74,8 @@ class MBRLPolicy(TorchPolicy):
         self.action_dist_class = TorchDiagGaussian
         self._track_id = torch.arange(0, 1, 1/self.obj2trk).view(-1, 1)
         self.random_actions = False
-        self._optimizer1 = Adam(self._action_model.parameters(), lr=0.0001)
-        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.001)
+        self._optimizer1 = Adam(self._action_model.parameters(), lr=0.0005)
+        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.005)
         self.discount = 0.99**torch.arange(self.seq_len-1, -1, -1)[None]
         self.discount = self.discount.transpose(1, 0).float()
         self.MSE_loss =  torch.nn.MSELoss()
@@ -115,17 +115,13 @@ class MBRLPolicy(TorchPolicy):
     def eval_predictor(self, batch):
         x = self.convert(batch['obs'])
         u = self.convert(batch['actions']).view(-1, self.act_input)
-        x_p1 = self.convert(batch['new_obs'])/self.obs_space_interval
-        y_p1 = self._prediction_model(x, u)/self.obs_space_interval
-        loss = self.MSE_loss(x_p1, y_p1)
-        mse = loss.detach().item()
-        mae = (y_p1 - x_p1).abs().sum(dim=-1).mean().detach().item()
-        # d_p1 = x_p1 - x
-        # # pdb.set_trace()
-        # dist = self._prediction_model(
-        #     torch.cat([x, u], dim=-1), return_mode='DIST'
-        # )
-        # d = TransformedDistribution(dist, self.prediction_transforms)
+        x_p1 = self.convert(batch['new_obs'])
+        y_p1 = self._prediction_model(torch.cat([x, u], dim=-1))
+        d_p1 = TransformedDistribution(y_p1, self.prediction_transforms)
+        loss = -(d_p1.log_prob(x_p1).sum(dim=-1).mean())
+        # pdb.set_trace()
+        mse = 0 # loss.detach().item()
+        mae = 0 # (y_p1 - x_p1).abs().sum(dim=-1).mean().detach().item()
         return loss, mse, mae
 
     def generate_trajectory(self,
@@ -142,7 +138,7 @@ class MBRLPolicy(TorchPolicy):
                 logstd = u.stddev.log()
             d = TransformedDistribution(u, self.action_transforms)
             a = d.sample()
-            x = self._prediction_model(x, a).detach()
+            x = self._prediction_model(torch.cat([x, a], dim=-1)).mean.detach()
             us.append(a.squeeze().clone())
             xs.append(x.squeeze().clone())
             if return_log_probs:

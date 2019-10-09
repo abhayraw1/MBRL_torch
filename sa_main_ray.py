@@ -36,6 +36,7 @@ parser.add_argument("--num-iters", type=int, default=9000)
 parser.add_argument("--num-workers", type=int, default=10)
 parser.add_argument("--num-eval-eps", type=int, default=5)
 parser.add_argument("--eval-horizon", type=int, default=100)
+parser.add_argument("--restore", type=str, default=None)
 
 np.set_printoptions(suppress=True, linewidth=300, precision=4,
                     formatter={'float_kind':'{:10.6f}'.format})
@@ -148,7 +149,7 @@ def training_workflow(config, reporter):
             predictor_loss = policy.train_predictor(batch)
 
         # Train the actor network
-        if (i - last_iter_train)//15 > 0 and predictor_loss['MAE'] < 0.05:
+        if (i - last_iter_train)//15 > 0 and predictor_loss['NLL'] < 0.05:
             last_iter_train = i
             # Train the action Model (off-policy?)
             for _ in range(10):
@@ -207,6 +208,7 @@ if __name__ == "__main__":
         },
         verbose=2,
         loggers=None,
+        # checkpoint_freq=1,
     )
     pdb.set_trace()
 
