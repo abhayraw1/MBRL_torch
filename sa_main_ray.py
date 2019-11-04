@@ -87,13 +87,13 @@ def training_workflow(config, reporter):
     last_iter_saved = 0
     last_iter_train = 0
 
-    ############################ DEFINE POLICY STUFF ###########################
+    ############################ DEFINE POLICY STUFF ##########################
     obs = base.observation_space
     act = base.action_space
     policy = MBRLPolicy(obs, act, config)
     replay_buffer = ReplayBuffer(config['buffer_size'])
 
-    ############################## REMOTE WORKERS ##############################
+    ############################## REMOTE WORKERS #############################
     remote_workers = []
     for _ in range(config["num_workers"]):
         worker = RolloutWorker.as_remote().remote(
@@ -103,7 +103,7 @@ def training_workflow(config, reporter):
         )
         remote_workers.append(worker)
 
-    ################################ EVAL WORKER ###############################
+    ################################ EVAL WORKER ##############################
     eval_worker = RolloutWorker(
         lambda x: base,
         policy=MBRLPolicy,
@@ -112,7 +112,7 @@ def training_workflow(config, reporter):
         eval_mode=True,
     )
     eval_worker.policy_map['default_policy'] = policy
-    ########################### VIDEO RECORDER SETUP ###########################
+    ########################### VIDEO RECORDER SETUP ##########################
     video_recorder = VideoRecorder(
         env=eval_worker.sampler.base_env.get_unwrapped()[0],
         path='/home/aarg/Documents/mbrl_torch_g2g/monitor/pendulum/vid.mp4',
