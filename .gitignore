@@ -1,4 +1,5 @@
 *.ipynb*
+ipynbs/
 __pycache__
 assignment1/
 models/
