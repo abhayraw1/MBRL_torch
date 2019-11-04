@@ -94,17 +94,20 @@ class MBRLPolicy(TorchPolicy):
             tensor = tensor.float()
         return tensor.to(self.device)
 
-    def trajectory_loss(self, xs, us, lp, means=None):
+    def trajectory_loss(self, xs, us, lp=None, means=None):
         # The timesteps are reversed for cumsum
         # We need the t=0 cost to be sum of c_t \in {0, 1,... self.seq_len}
         txs = torch.stack(xs[::-1])
         uss = torch.stack(us[::-1])
-        lps = torch.stack(lp[::-1]).squeeze()
         c, s, d = txs.transpose(0, -1).transpose(-1, 1)
         th = torch.atan2(s, c)
         cost = torch.cumsum(th**2 + 0.1*d**2 + 0.001*uss**2, dim=0)
-        expected_cost = lps*cost
-        return expected_cost.mean(dim=0).mean()
+        if lp is not None:
+            lps = torch.stack(lp[::-1]).squeeze()
+            expected_cost = lps*cost
+            return expected_cost.mean(dim=0).mean()
+        else:
+            return cost.mean(dim=0).mean()
 
     def eval_predictor(self, batch):
         x = self.convert(batch['obs'])
@@ -131,7 +134,7 @@ class MBRLPolicy(TorchPolicy):
                 mean = u.mean
                 logstd = u.stddev.log()
             d = TransformedDistribution(u, self.action_transforms)
-            a = d.sample()
+            a = mean if mode == 'E' else d.sample()
             x = self._prediction_model(torch.cat([x, a], dim=-1)).mean.detach()
             us.append(a.squeeze().clone())
             xs.append(x.squeeze().clone())
@@ -182,10 +185,27 @@ class MBRLPolicy(TorchPolicy):
         with self.lock:
             with torch.no_grad():
                 z = self.convert(obs_batch)
-                xs, us = self.generate_trajectory(z, seq_len=1, mode=eval_mode)
-                us = [u.cpu().numpy() for u in us]
-                xs = [u.cpu().numpy() for u in xs]
-        return (us, xs, {}) if return_states else (us, [], {})
+                xs, us = self.generate_trajectory(z, mode=eval_mode)
+            local = torch.tensor(us, requires_grad=True)
+            l_opt = Adam([local], lr=0.01)
+            for _ in range(20):
+                x = z.clone().detach().squeeze()
+                xs, us, lp = [], [], []
+                l_opt.zero_grad()
+                for a in local.reshape(-1, 1):
+                    x = self._prediction_model(torch.cat([x, a])).mean.detach()
+                    us.append(a.squeeze().clone())
+                    xs.append(x.squeeze().clone())
+                self.trajectory_loss(xs, us).backward()
+                l_opt.step()
+
+            # pdb.set_trace()
+            us = local.reshape(-1, 1)[0].detach()
+            xs = self._prediction_model(
+                    torch.cat([z.clone().detach().squeeze(), us])
+                ).mean.detach().numpy()
+            us = us.numpy()
+        return ([us], [xs], {}) if return_states else ([us], [], {})
 
     def learn_on_batch(self, samples):
         print('implement your learning code here\n'*10)
