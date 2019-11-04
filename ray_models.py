@@ -39,6 +39,7 @@ class VanillaModel(nn.Module):
                  hidden_activation=nn.ReLU,
                  output_activation=nn.ReLU,
                  gaussian=False,
+                 log_std_op_dim=None,
                  model_config=None,
                  dist_class=None):
         super().__init__()
@@ -48,6 +49,8 @@ class VanillaModel(nn.Module):
         layers = []
         last_layer_size = in_dim
         self.dist_class = dist_class or Normal
+        assert self.dist_class == Normal or log_std_op_dim is not None,\
+        '# of o/p units needed if dist_class != Normal!'
         for i, (units, act) in enumerate(zip(hidden_units, hidden_activation)):
             layers.append(
                 SlimFC(
