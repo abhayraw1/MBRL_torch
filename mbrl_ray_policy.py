@@ -19,10 +19,8 @@ from ray.rllib.models.torch.torch_action_dist import (TorchMultinomial,
 from ray_models import *
 
 class MBRLPolicy(TorchPolicy):
-    """Model Predictive Policy for an Agent in multi-agent scenario.
-
-    You might find it more convenient to extend TF/TorchPolicy instead
-    for a real policy.
+    """
+    Model Predictive Policy for an Agent.
     """
     @staticmethod
     def size(x):
@@ -52,10 +50,6 @@ class MBRLPolicy(TorchPolicy):
             self.obs_input, self.act_input, [50, 50], gaussian=True,
             output_activation=nn.Tanh
         ).to(self.device)
-
-        # self._prediction_model = DynamixForward(
-        #     self.obs_input + self.act_input, self.obs_input,
-        # ).to(self.device)
         self._prediction_model = VanillaModel(
             self.obs_input + self.act_input, self.obs_input, [50, 50],
             gaussian=True, output_activation=nn.Tanh
@@ -75,22 +69,22 @@ class MBRLPolicy(TorchPolicy):
         self._track_id = torch.arange(0, 1, 1/self.obj2trk).view(-1, 1)
         self.random_actions = False
         self._optimizer1 = Adam(self._action_model.parameters(), lr=0.0005)
-        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.005)
+        self._optimizer2 = Adam(self._prediction_model.parameters(), lr=0.01)
         self.discount = 0.99**torch.arange(self.seq_len-1, -1, -1)[None]
         self.discount = self.discount.transpose(1, 0).float()
         self.MSE_loss =  torch.nn.MSELoss()
         self.action_transforms = [
             TanhTransform(),
             AffineTransform(
-                loc=0,
-                scale=self.convert(self.act_space.high)
+                self.convert((self.act_space.high + self.act_space.low)/2),
+                self.convert((self.act_space.high - self.act_space.low)/2)
             )
         ]
         self.prediction_transforms = [
             TanhTransform(),
             AffineTransform(
-                loc=0,
-                scale=self.convert(self.obs_space.high)
+                self.convert((self.obs_space.high + self.obs_space.low)/2),
+                self.convert((self.obs_space.high - self.obs_space.low)/2)
             )
         ]
 
